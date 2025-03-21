@@ -1,9 +1,10 @@
 import concurrent.futures
-import os 
 from collections import defaultdict
 import math
+import os
+import queue  # Import the built-in queue module
 
-NUM_THREADS = os.cpu_count()   # Use 12 threads for your 12-core processor
+NUM_THREADS = os.cpu_count()  # Use 12 threads for your 12-core processor
 
 def round_to_infinity(x, digits=1):
     """
@@ -31,6 +32,9 @@ def process_chunk(lines):
     return city_scores
 
 def main(input_file_name="testcase.txt", output_file_name="output.txt"):
+    # Use a different variable name so we don't shadow the 'queue' module.
+    task_queue = queue.Queue()
+
     city_data = defaultdict(list)  # Dictionary to store scores grouped by city
 
     # Read all lines from the input file using a large buffer for efficiency
