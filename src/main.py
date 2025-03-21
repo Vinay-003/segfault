@@ -2,9 +2,10 @@ import concurrent.futures
 from collections import defaultdict
 import math
 import os
-import queue  # Import the built-in queue module
+import mmap
 
-NUM_THREADS = os.cpu_count()  # Use 12 threads for your 12-core processor
+# Use all available cores
+NUM_WORKERS = os.cpu_count() or 1
 
 def round_to_infinity(x, digits=1):
     """
@@ -17,51 +18,53 @@ def round_to_infinity(x, digits=1):
     return math.ceil(x * factor) / factor
 
 def process_chunk(lines):
-    """Process a chunk of lines and return a dictionary mapping cities to a list of scores."""
+    """
+    Process a chunk (list of lines) and return a dictionary mapping cities to a list of scores.
+    This function is run in a separate process.
+    """
     city_scores = defaultdict(list)
     for line in lines:
-        parts = line.strip().split(";")  # Split using ";"
+        # Use split with maxsplit=1 for a small speedup.
+        parts = line.strip().split(";", 1)
         if len(parts) != 2:
-            continue  # Skip malformed lines
-        city, score = parts[0].strip(), parts[1].strip()
+            continue
+        city, score_str = parts[0].strip(), parts[1].strip()
         try:
-            score = float(score)  # Convert score to float
+            score = float(score_str)
             city_scores[city].append(score)
         except ValueError:
-            continue  # Skip invalid numeric values
+            continue
     return city_scores
 
 def main(input_file_name="testcase.txt", output_file_name="output.txt"):
-    # Use a different variable name so we don't shadow the 'queue' module.
-    task_queue = queue.Queue()
+    city_data = defaultdict(list)
 
-    city_data = defaultdict(list)  # Dictionary to store scores grouped by city
+    # Use memory mapping to quickly load the file content.
+    with open(input_file_name, "r") as f:
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            # Decode once and split into lines.
+            lines = mm.read().decode('utf-8').splitlines()
 
-    # Read all lines from the input file using a large buffer for efficiency
-    with open(input_file_name, "r", buffering=2**20) as input_file:
-        lines = input_file.readlines()
-
-    # Break the file into chunks for parallel processing
-    chunk_size = max(1, len(lines) // NUM_THREADS)
+    # Split the list of lines into chunks (each chunk gets roughly equal lines).
+    chunk_size = max(1, len(lines) // NUM_WORKERS)
     chunks = [lines[i:i + chunk_size] for i in range(0, len(lines), chunk_size)]
 
-    # Process each chunk concurrently using ThreadPoolExecutor
-    with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
+    # Use ProcessPoolExecutor for CPU-bound parsing.
+    with concurrent.futures.ProcessPoolExecutor(max_workers=NUM_WORKERS) as executor:
         results = executor.map(process_chunk, chunks)
 
-    # Aggregate results from all threads
-    for city_scores in results:
-        for city, scores in city_scores.items():
+    # Aggregate results from each worker.
+    for partial in results:
+        for city, scores in partial.items():
             city_data[city].extend(scores)
 
-    # Sort cities alphabetically
+    # Sort cities alphabetically.
     sorted_cities = sorted(city_data.keys())
 
-    # Write results to the output file using the custom rounding function
     with open(output_file_name, "w") as output_file:
         for city in sorted_cities:
             if not city_data[city]:
-                continue  # Skip if no valid data for this city
+                continue
             min_score = min(city_data[city])
             mean_score = sum(city_data[city]) / len(city_data[city])
             max_score = max(city_data[city])
