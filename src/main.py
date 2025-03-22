@@ -70,6 +70,10 @@ def process_chunk_lines(lines, num_threads):
     Splits lines into subchunks and processes them in parallel (multithreading).
     Returns a dictionary mapping city -> [min, max, sum, count].
     """
+    # If there are fewer lines than threads, process sequentially
+    if len(lines) < num_threads:
+        return process_subchunk(lines)
+    
     subchunk_size = max(1, len(lines) // num_threads)
     subchunks = [lines[i:i+subchunk_size] for i in range(0, len(lines), subchunk_size)]
     combined_stats = defaultdict(default_stats)
@@ -90,20 +94,19 @@ def process_file_chunk(filename, start, end, num_threads):
     """
     local_stats = defaultdict(default_stats)
     with open(filename, "rb") as f:
-        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-        mm.seek(start)
-        chunk_data = mm.read(end - start)
-        # Split by newline (resulting in a list of bytes)
-        lines = chunk_data.split(b'\n')
-        # Decode lines to strings (ignore decode errors)
-        decoded_lines = []
-        for line in lines:
-            try:
-                decoded_lines.append(line.decode('utf-8').strip())
-            except UnicodeDecodeError:
-                continue
-        local_stats = process_chunk_lines(decoded_lines, num_threads)
-        mm.close()
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            mm.seek(start)
+            chunk_data = mm.read(end - start)
+            # Split chunk_data into lines (as bytes)
+            raw_lines = chunk_data.split(b'\n')
+            # Decode each line; skip lines that cannot be decoded.
+            decoded_lines = []
+            for bline in raw_lines:
+                try:
+                    decoded_lines.append(bline.decode('utf-8'))
+                except UnicodeDecodeError:
+                    continue
+            local_stats = process_chunk_lines(decoded_lines, num_threads)
     return local_stats
 
 def get_chunk_boundaries(filename, num_chunks):
@@ -119,7 +122,7 @@ def get_chunk_boundaries(filename, num_chunks):
         start = 0
         for i in range(num_chunks):
             f.seek(start + chunk_size)
-            # Move to the end of the current line
+            # Adjust to the end of the current line
             line = f.readline()
             if not line:
                 end = file_size
@@ -136,8 +139,9 @@ def get_chunk_boundaries(filename, num_chunks):
 
 def main(input_file="testcase.txt", output_file="output.txt"):
     num_processes = os.cpu_count() or 1
-    num_threads = os.cpu_count() or 1  # Use same number for threads per process
+    num_threads = os.cpu_count() or 1  # Use same number of threads per process
     
+    # Determine file chunk boundaries for multiprocessing
     boundaries = get_chunk_boundaries(input_file, num_processes)
     overall_stats = defaultdict(default_stats)
     
@@ -150,7 +154,7 @@ def main(input_file="testcase.txt", output_file="output.txt"):
             chunk_stats = future.result()
             merge_stats(overall_stats, chunk_stats)
     
-    # Write results to the output file, sorted by city
+    # Write results to output file in sorted order by city
     with open(output_file, "w", encoding="utf-8") as fout:
         for city in sorted(overall_stats.keys()):
             m, M, s, cnt = overall_stats[city]
