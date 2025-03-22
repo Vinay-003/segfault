@@ -1,11 +1,9 @@
 import subprocess
 
-awk_command = r'''awk -F ';' '
+awk_command = r'''LC_NUMERIC=C awk -F';' '
 function ceil(x) { return (x == int(x)) ? x : int(x) + (x > 0) }
 function round_up(val) { return ceil(val * 10) / 10 }
-NF != 2 { next }
-$2 !~ /^[-+]?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?$/ { next }
-{
+NF==2 {
     city = $1
     value = $2 + 0
     if (city in min) {
@@ -23,7 +21,7 @@ END {
         avg = sum[city] / count[city]
         printf "%s=%.1f/%.1f/%.1f\n", city, round_up(min[city]), round_up(avg), round_up(max[city])
     }
-}' testcase.txt | sort -t '=' -k1,1 > output.txt
+}' testcase.txt | sort -T /tmp --parallel=$(nproc) -t'=' -k1,1 > output.txt
 '''
 
 try:
