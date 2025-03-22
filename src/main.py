@@ -1,110 +1,118 @@
+import concurrent.futures
+import csv
+import io
+import os
 import math
-import mmap
-import multiprocessing
 from collections import defaultdict
+import mmap
 
-def round_inf(x):
-    return math.ceil(x * 10) / 10  
+# Use all available CPU cores
+NUM_PROCESSES = os.cpu_count()
 
-def default_city_data():
-    # [min, max, total, count]
+def round_up(value, decimals=1):
+    """Rounds value upward (toward +∞) to the specified number of decimal places."""
+    factor = 10 ** decimals
+    return math.ceil(value * factor) / factor
+
+def default_stats():
+    """Return default stats [min, max, sum, count] for a city."""
     return [float('inf'), float('-inf'), 0.0, 0]
 
-def process_chunk(filename, start_offset, end_offset):
-    data = defaultdict(default_city_data)
-    with open(filename, "rb") as f:
-        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-        file_size = len(mm)
+def process_chunk(chunk_bytes):
+    """
+    Process a chunk (independent bytes object) of the file.
+    Uses the CSV module for fast parsing and aggregates scores per city.
+    Returns a dictionary mapping each city to [min, max, sum, count].
+    """
+    city_stats = defaultdict(default_stats)
 
-        # If start_offset is already beyond the file, return empty data
-        if start_offset >= file_size:
-            mm.close()
-            return data
+    # Wrap bytes in a BytesIO stream for CSV processing
+    bio = io.BytesIO(chunk_bytes)
+    reader = csv.reader(io.TextIOWrapper(bio, encoding='utf-8'), delimiter=';')
 
-        # Align start_offset: if not at beginning, skip partial line
-        if start_offset:
-            mm.seek(start_offset)
-            nl = mm.find(b'\n')
-            if nl == -1:
-                mm.close()
-                return data
-            start_offset += nl + 1
-            if start_offset >= file_size:
-                mm.close()
-                return data
-
-        # Ensure end_offset does not exceed file_size
-        end_offset = min(end_offset, file_size)
-        mm.seek(end_offset)
-        nl = mm.find(b'\n')
-        if nl != -1:
-            end_offset += nl + 1
-        end_offset = min(end_offset, file_size)
-
-        # Read the entire chunk at once
-        mm.seek(start_offset)
-        chunk = mm.read(end_offset - start_offset)
-        mm.close()
-
-    # Process lines using splitlines (fast on bytes)
-    for line in chunk.splitlines():
-        if not line:
-            continue
+    for row in reader:
+        if len(row) != 2:
+            continue  # Skip malformed lines
+        city = row[0]
         try:
-            city, score_str = line.split(b';', 1)
-            score = float(score_str)
-        except Exception:
-            continue
+            score = float(row[1])
+        except ValueError:
+            continue  # Skip invalid numbers
 
-        stats = data[city]
-        if score < stats[0]:
-            stats[0] = score
-        if score > stats[1]:
-            stats[1] = score
-        stats[2] += score
-        stats[3] += 1
+        stats = city_stats[city]
+        stats[0] = min(stats[0], score)  # min score
+        stats[1] = max(stats[1], score)  # max score
+        stats[2] += score               # sum of scores
+        stats[3] += 1                   # count
 
-    return data
+    return city_stats
 
-def merge_data(results):
-    final = defaultdict(default_city_data)
-    for data in results:
-        for city, stats in data.items():
-            fstats = final[city]
-            if stats[0] < fstats[0]:
-                fstats[0] = stats[0]
-            if stats[1] > fstats[1]:
-                fstats[1] = stats[1]
-            fstats[2] += stats[2]
-            fstats[3] += stats[3]
-    return final
+def merge_results(results):
+    """Merge multiple dictionaries into a single aggregated dictionary."""
+    merged_stats = defaultdict(default_stats)
 
-def main(input_file_name="testcase.txt", output_file_name="output.txt"):
-    with open(input_file_name, "rb") as f:
+    for city_data in results:
+        for city, stats in city_data.items():
+            entry = merged_stats[city]
+            entry[0] = min(entry[0], stats[0])
+            entry[1] = max(entry[1], stats[1])
+            entry[2] += stats[2]
+            entry[3] += stats[3]
+
+    return merged_stats
+
+def main(input_file="testcase.txt", output_file="output.txt"):
+    file_size = os.path.getsize(input_file)
+    
+    # If file is empty, write empty output and exit.
+    if file_size == 0:
+        with open(output_file, "w") as f:
+            f.write("")
+        return
+
+    # Memory-map the file for efficient reading.
+    with open(input_file, "rb") as f:
         mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-        file_size = len(mm)
-        mm.close()
+        try:
+            chunks = []
+            approx_chunk_size = file_size // NUM_PROCESSES
+            offset = 0
 
-    num_procs = multiprocessing.cpu_count()
-    chunk_size = file_size // num_procs
-    # Compute chunk boundaries
-    chunks = [(i * chunk_size, file_size if i == num_procs - 1 else (i + 1) * chunk_size)
-              for i in range(num_procs)]
-    
-    with multiprocessing.Pool(num_procs) as pool:
-        tasks = [(input_file_name, start, end) for start, end in chunks]
-        results = pool.starmap(process_chunk, tasks)
-    
-    final_data = merge_data(results)
-    
-    out_lines = []
-    for city in sorted(final_data.keys()):
-        mn, mx, total, count = final_data[city]
-        avg = round_inf(total / count)
-        out_lines.append(f"{city.decode()}={round_inf(mn):.1f}/{avg:.1f}/{round_inf(mx):.1f}\n")
-    
-    with open(output_file_name, "w") as f:
-        f.writelines(out_lines)
+            # Split the file into NUM_PROCESSES chunks, aligning on newline boundaries.
+            for i in range(NUM_PROCESSES):
+                if offset >= file_size:
+                    break
+                if i == NUM_PROCESSES - 1:
+                    end = file_size
+                else:
+                    end = offset + approx_chunk_size
+                    while end < file_size and mm[end] != ord('\n'):
+                        end += 1
+                    if end < file_size:
+                        end += 1  # Include newline
+
+                # Create an independent bytes object for this chunk.
+                chunks.append(bytes(mm[offset:end]))
+                offset = end
+        finally:
+            mm.close()
+
+    # Process chunks in parallel using ProcessPoolExecutor.
+    with concurrent.futures.ProcessPoolExecutor(max_workers=NUM_PROCESSES) as executor:
+        results = executor.map(process_chunk, chunks)
+
+    # Merge results from all processes.
+    final_stats = merge_results(results)
+
+    # Sort cities alphabetically and write aggregated statistics to the output file.
+    with open(output_file, "w") as f:
+        for city in sorted(final_stats.keys()):
+            min_score, max_score, total_score, count = final_stats[city]
+            if count:
+                avg_score = round_up(total_score / count, 1)
+                f.write(f"{city}={round_up(min_score,1):.1f}/"
+                        f"{avg_score:.1f}/"
+                        f"{round_up(max_score,1):.1f}\n")
 
 if __name__ == "__main__":
     main()
