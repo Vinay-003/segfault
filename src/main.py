@@ -1,115 +1,115 @@
+import os
 import math
 import mmap
 import multiprocessing
-import os 
 from collections import defaultdict
 
-def round_inf(x):
-    """Rounds x upward (toward +∞) to one decimal place."""
-    return math.ceil(x * 10) / 10  
+# Function to round values up to the nearest tenth
+def ceil_to_tenth(value):
+    return math.ceil(value * 10) / 10  
 
-def default_city_data():
-    # [min, max, sum, count]
+# Initializes default city statistics
+def init_city_stats():
     return [float('inf'), float('-inf'), 0.0, 0]
 
-def process_chunk(filename, start_offset, end_offset):
-    data = defaultdict(default_city_data)
-    with open(filename, "rb") as f:
-        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-        size = len(mm)
-        
-        # Adjust start_offset to next newline if not at beginning.
-        if start_offset != 0:
-            while start_offset < size and mm[start_offset] != ord('\n'):
-                start_offset += 1
-            start_offset += 1  # skip newline
-        
-        # Adjust end_offset to end of current line.
-        end = end_offset
-        while end < size and mm[end] != ord('\n'):
+# Processes a file segment and extracts statistics
+def analyze_segment(file_path, start, end):
+    city_stats = defaultdict(init_city_stats)
+
+    with open(file_path, "rb") as file:
+        mmapped_file = mmap.mmap(file.fileno(), 0, access=mmap.ACCESS_READ)
+        total_size = len(mmapped_file)
+
+        # Ensure the segment starts at a full line
+        if start != 0:
+            while start < total_size and mmapped_file[start] != ord('\n'):
+                start += 1
+            start += 1
+
+        # Ensure the segment ends at a full line
+        while end < total_size and mmapped_file[end] != ord('\n'):
             end += 1
-        if end < size:
-            end += 1  # include newline
-        
-        chunk = mm[start_offset:end]
-        mm.close()
-    
-    # Process each line in the chunk.
-    for line in chunk.split(b'\n'):
-        if not line:
+        if end < total_size:
+            end += 1
+
+        data_chunk = mmapped_file[start:end]
+        mmapped_file.close()
+
+    # Process each line in the chunk
+    for entry in data_chunk.split(b'\n'):
+        if not entry:
             continue
         
-        semicolon_pos = line.find(b';')
-        if semicolon_pos == -1:
+        separator = entry.find(b';')
+        if separator == -1:
             continue
         
-        city = line[:semicolon_pos]  
-        score_str = line[semicolon_pos+1:]
-        
+        city_name = entry[:separator]
+        score_data = entry[separator + 1:]
+
         try:
-            score = float(score_str)
+            score = float(score_data)
         except ValueError:
             continue
-        
-        entry = data[city]
-        entry[0] = min(entry[0], score)
-        entry[1] = max(entry[1], score)
-        entry[2] += score
-        entry[3] += 1
-    
-    return data
 
-def merge_data(data_list):
-    final = defaultdict(default_city_data)  
-    for data in data_list:
-        for city, stats in data.items():
-            final_entry = final[city]
-            final_entry[0] = min(final_entry[0], stats[0])
-            final_entry[1] = max(final_entry[1], stats[1])
-            final_entry[2] += stats[2]
-            final_entry[3] += stats[3]
-    return final
+        record = city_stats[city_name]
+        record[0] = min(record[0], score)
+        record[1] = max(record[1], score)
+        record[2] += score
+        record[3] += 1
 
-def get_chunk_boundaries(filename, num_chunks):
-    file_size = os.path.getsize(filename)
-    chunk_size = file_size // num_chunks
-    boundaries = []
-    with open(filename, "rb") as f:
-        start = 0
-        for i in range(num_chunks):
-            f.seek(start + chunk_size)
-            line = f.readline()  # move to end of current line
-            if not line:
-                end = file_size
-            else:
-                end = f.tell()
-            boundaries.append((start, end))
-            start = end
-        if boundaries:
-            boundaries[-1] = (boundaries[-1][0], file_size)
-    return boundaries
+    return city_stats
 
-def main(input_file_name="testcase.txt", output_file_name="output.txt"):
-    # You can adjust num_procs. For a 2-core server, using 2 or 3 might be optimal.
-    num_procs = max(1, multiprocessing.cpu_count() - 1)
-    chunk_size = os.path.getsize(input_file_name) // num_procs
-    chunks = get_chunk_boundaries(input_file_name, num_procs)
-    
-    with multiprocessing.Pool(num_procs) as pool:
-        tasks = [(input_file_name, start, end) for start, end in chunks]
-        results = pool.starmap(process_chunk, tasks)
-    
-    final_data = merge_data(results)
-    
-    out_lines = []
+# Combines results from multiple processes
+def combine_results(result_list):
+    final_stats = defaultdict(init_city_stats)
+
+    for segment_data in result_list:
+        for city, values in segment_data.items():
+            merged_record = final_stats[city]
+            merged_record[0] = min(merged_record[0], values[0])
+            merged_record[1] = max(merged_record[1], values[1])
+            merged_record[2] += values[2]
+            merged_record[3] += values[3]
+
+    return final_stats
+
+# Main execution function
+def execute_analysis(input_file="testcase.txt", output_file="output.txt"):
+    # Determine system resources
+    core_count = os.cpu_count() or 4  # Default to 4 if detection fails
+    process_count = core_count  
+    thread_factor = 2  # Each process should ideally handle multiple threads
+
+    # Determine file size
+    with open(input_file, "rb") as file:
+        mmapped_file = mmap.mmap(file.fileno(), 0, access=mmap.ACCESS_READ)
+        total_bytes = len(mmapped_file)
+        mmapped_file.close()
+
+    # Divide file into segments
+    segment_size = total_bytes // process_count
+    partitions = [(i * segment_size, (i + 1) * segment_size if i < process_count - 1 else total_bytes)
+                  for i in range(process_count)]
+
+    # Process segments in parallel
+    with multiprocessing.Pool(process_count) as worker_pool:
+        job_list = [(input_file, start, end) for start, end in partitions]
+        partial_results = worker_pool.starmap(analyze_segment, job_list)
+
+    # Merge results
+    final_data = combine_results(partial_results)
+
+    # Format output
+    output_lines = []
     for city in sorted(final_data.keys()):
-        mn, mx, total, count = final_data[city]
-        avg = total / count
-        # Decode city (it is in bytes) using UTF-8; replace errors if needed.
-        out_lines.append(f"{city.decode('utf-8', errors='replace')}={round_inf(mn):.1f}/{round_inf(avg):.1f}/{round_inf(mx):.1f}\n")
-    
-    with open(output_file_name, "w") as f:
-        f.writelines(out_lines)
+        min_val, max_val, total_sum, count = final_data[city]
+        avg_val = ceil_to_tenth(total_sum / count)
+        output_lines.append(f"{city.decode()}={ceil_to_tenth(min_val):.1f}/{avg_val:.1f}/{ceil_to_tenth(max_val):.1f}\n")
+
+    # Save results
+    with open(output_file, "w") as file:
+        file.writelines(output_lines)
 
 if __name__ == "__main__":
-    main()
+    execute_analysis()
