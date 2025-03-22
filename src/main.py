@@ -1,73 +1,161 @@
-import concurrent.futures
 import os
-from collections import defaultdict
 import math
+import mmap
+from collections import defaultdict
+import concurrent.futures
 
-NUM_THREADS = os.cpu_count()  # Use all available cores
+# ---------------------
+# Top-level helper functions
+
+def default_stats():
+    """Return a default stats list: [min, max, sum, count]."""
+    return [None, None, 0.0, 0]
 
 def round_up(x, digits=1):
     """
     Rounds x upward (toward +∞) to the specified number of decimal places.
     For example:
-      round_up(-0.1500001, 1) returns -0.1
+      round_up(-0.15, 1) returns -0.1
       round_up(2.341, 1) returns 2.4
     """
     factor = 10 ** digits
     return math.ceil(x * factor) / factor
 
-def process_chunk(lines):
+def merge_stats(stats1, stats2):
     """
-    Process a chunk of lines and return a dictionary mapping cities to a list of scores.
+    Merges two dictionaries of stats.
+    Each dictionary maps city -> [min, max, sum, count].
     """
-    city_scores = defaultdict(list)
+    for city, data in stats2.items():
+        if city in stats1:
+            m, M, s, cnt = stats1[city]
+            dm, dM, ds, dcnt = data
+            stats1[city] = [min(m, dm), max(M, dM), s + ds, cnt + dcnt]
+        else:
+            stats1[city] = data
+    return stats1
+
+# ---------------------
+# Subchunk processing (for multithreading)
+
+def process_subchunk(lines):
+    """
+    Process a list of decoded lines (strings).
+    Returns a dictionary mapping city -> [min, max, sum, count].
+    """
+    stats = defaultdict(default_stats)
     for line in lines:
-        parts = line.strip().split(";")
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(";")
         if len(parts) != 2:
             continue  # Skip malformed lines
         city = parts[0].strip()
         try:
-            score = float(parts[1].strip())
-            city_scores[city].append(score)
+            value = float(parts[1].strip())
         except ValueError:
-            continue  # Skip lines where the score isn't numeric
-    return city_scores
+            continue
+        if stats[city][0] is None:
+            stats[city] = [value, value, value, 1]
+        else:
+            stats[city][0] = min(stats[city][0], value)
+            stats[city][1] = max(stats[city][1], value)
+            stats[city][2] += value
+            stats[city][3] += 1
+    return stats
+
+def process_chunk_lines(lines, num_threads):
+    """
+    Splits lines into subchunks and processes them in parallel (multithreading).
+    Returns a dictionary mapping city -> [min, max, sum, count].
+    """
+    subchunk_size = max(1, len(lines) // num_threads)
+    subchunks = [lines[i:i+subchunk_size] for i in range(0, len(lines), subchunk_size)]
+    combined_stats = defaultdict(default_stats)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+        results = executor.map(process_subchunk, subchunks)
+    for subdict in results:
+        merge_stats(combined_stats, subdict)
+    return combined_stats
+
+# ---------------------
+# Multiprocessing: Process a file chunk using mmap
+
+def process_file_chunk(filename, start, end, num_threads):
+    """
+    Opens the file, memory-maps it, and processes the data in the byte range [start, end).
+    Splits the chunk into lines and uses multithreading to process subchunks.
+    Returns a dictionary mapping city -> [min, max, sum, count].
+    """
+    local_stats = defaultdict(default_stats)
+    with open(filename, "rb") as f:
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        mm.seek(start)
+        chunk_data = mm.read(end - start)
+        # Split by newline (resulting in a list of bytes)
+        lines = chunk_data.split(b'\n')
+        # Decode lines to strings (ignore decode errors)
+        decoded_lines = []
+        for line in lines:
+            try:
+                decoded_lines.append(line.decode('utf-8').strip())
+            except UnicodeDecodeError:
+                continue
+        local_stats = process_chunk_lines(decoded_lines, num_threads)
+        mm.close()
+    return local_stats
+
+def get_chunk_boundaries(filename, num_chunks):
+    """
+    Divides the file into num_chunks chunks.
+    Returns a list of (start, end) byte positions for each chunk,
+    adjusted to newline boundaries.
+    """
+    file_size = os.path.getsize(filename)
+    chunk_size = file_size // num_chunks
+    boundaries = []
+    with open(filename, "rb") as f:
+        start = 0
+        for i in range(num_chunks):
+            f.seek(start + chunk_size)
+            # Move to the end of the current line
+            line = f.readline()
+            if not line:
+                end = file_size
+            else:
+                end = f.tell()
+            boundaries.append((start, end))
+            start = end
+        if boundaries:
+            boundaries[-1] = (boundaries[-1][0], file_size)
+    return boundaries
+
+# ---------------------
+# Main Function
 
 def main(input_file="testcase.txt", output_file="output.txt"):
-    city_data = defaultdict(list)
-
-    # Read the entire file with a large buffer for efficiency
-    with open(input_file, "r", buffering=2**20) as fin:
-        lines = fin.readlines()
-
-    # Break the file into chunks for parallel processing
-    chunk_size = max(1, len(lines) // NUM_THREADS)
-    chunks = [lines[i:i+chunk_size] for i in range(0, len(lines), chunk_size)]
-
-    # Process chunks in parallel using threads
-    with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
-        results = executor.map(process_chunk, chunks)
-
-    # Aggregate the results
-    for result in results:
-        for city, scores in result.items():
-            city_data[city].extend(scores)
-
-    # Sort cities alphabetically
-    sorted_cities = sorted(city_data.keys())
-
-    # Write results to the output file
-    with open(output_file, "w") as fout:
-        for city in sorted_cities:
-            scores = city_data[city]
-            if not scores:
-                continue
-            min_score = min(scores)
-            avg_score = sum(scores) / len(scores)
-            max_score = max(scores)
-            # Use round_up to round all numbers upward (toward +∞)
-            fout.write(f"{city}={round_up(min_score,1)}/"
-                       f"{round_up(avg_score,1)}/"
-                       f"{round_up(max_score,1)}\n")
+    num_processes = os.cpu_count() or 1
+    num_threads = os.cpu_count() or 1  # Use same number for threads per process
+    
+    boundaries = get_chunk_boundaries(input_file, num_processes)
+    overall_stats = defaultdict(default_stats)
+    
+    with concurrent.futures.ProcessPoolExecutor(max_workers=num_processes) as executor:
+        futures = [
+            executor.submit(process_file_chunk, input_file, start, end, num_threads)
+            for (start, end) in boundaries
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            chunk_stats = future.result()
+            merge_stats(overall_stats, chunk_stats)
+    
+    # Write results to the output file, sorted by city
+    with open(output_file, "w", encoding="utf-8") as fout:
+        for city in sorted(overall_stats.keys()):
+            m, M, s, cnt = overall_stats[city]
+            avg = s / cnt
+            fout.write(f"{city}={round_up(m,1)}/{round_up(avg,1)}/{round_up(M,1)}\n")
 
 if __name__ == "__main__":
     main()
